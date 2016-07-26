@@ -1,0 +1,88 @@
+/**
+ * 
+ */
+package com.zaloni.idc.mapper;
+
+import java.io.IOException;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.BooleanWritable;
+import org.apache.hadoop.io.IntWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Mapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.zaloni.idc.record.IDCRecord;
+
+/**
+ * @author Revanth
+ * 
+ */
+public class DeltaFileMapper extends Mapper<Object, Text, Text, IDCRecord> {
+
+	private static Logger LOG = LoggerFactory.getLogger(DeltaFileMapper.class);
+
+	private String DELIMITER = ",";
+
+	private IDCRecord idcRecord = new IDCRecord();
+
+	private DateFormat DATE_FORMAT = new SimpleDateFormat("MM/dd/yyyy");
+
+	private Integer idcIndex = new Integer(0);
+
+	private String primaryKeys;
+
+	@Override
+	protected void setup(Context context) throws IOException,
+			InterruptedException {
+		super.setup(context);
+		Configuration conf = context.getConfiguration();
+		DELIMITER = conf.get("delimiter");
+		DATE_FORMAT = new SimpleDateFormat(conf.get("dateformat"));
+		idcIndex = conf.getInt("idcIndex", 0);
+		primaryKeys = conf.get("primayKeyIndices");
+
+	}
+
+	@Override
+	protected void map(Object key, Text value, Context context)
+			throws IOException, InterruptedException {
+
+		context.write(new Text(getPrimaryKey(value)), mapDeltaRec(value));
+	}
+
+	private IDCRecord mapDeltaRec(Text value) {
+		idcRecord = new IDCRecord(value, getIDCColumn(value, idcIndex),
+				new BooleanWritable(false), new BooleanWritable(true));
+		return idcRecord;
+	}
+
+	private IntWritable getIDCColumn(Text value, int index) {
+		String[] tokens = value.toString().split(DELIMITER);
+		IntWritable idcDate = null;
+		try {
+			idcDate = new IntWritable((int) DATE_FORMAT.parse(tokens[index])
+					.getTime());
+		} catch (ParseException e) {
+			LOG.error("ERROR PARSING DATE FROM VALUE " + value + " AT INDEX "
+					+ index);
+		}
+
+		return idcDate;
+	}
+
+	private String getPrimaryKey(Text value) {
+		String[] tokens = primaryKeys.split(",");
+		String[] valuetokens = value.toString().split(DELIMITER);
+		StringBuilder keyBuilder = new StringBuilder();
+		for (String token : tokens) {
+			keyBuilder.append(valuetokens[Integer.parseInt(token)]);
+		}
+		return keyBuilder.toString();
+	}
+
+}

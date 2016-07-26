@@ -1,0 +1,87 @@
+/**
+ * 
+ */
+package com.zaloni.idc.model.bedrock;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class Field implements Comparable<Field> {
+
+	private Integer position;
+
+	private String tokenized;
+
+	private String startOffset;
+
+	private String endOffset;
+
+	private boolean primary;
+
+	private String dataFormat;
+
+	private String technicalName;
+
+	public Integer getPosition() {
+		return position;
+	}
+
+	public void setPosition(Integer position) {
+		this.position = position;
+	}
+
+	public String getTokenized() {
+		return tokenized;
+	}
+
+	public void setTokenized(String tokenized) {
+		this.tokenized = tokenized;
+	}
+
+	public String getStartOffset() {
+		return startOffset;
+	}
+
+	public void setStartOffset(String startOffset) {
+		this.startOffset = startOffset;
+	}
+
+	public String getEndOffset() {
+		return endOffset;
+	}
+
+	public void setEndOffset(String endOffset) {
+		this.endOffset = endOffset;
+	}
+
+	public boolean isPrimary() {
+		return primary;
+	}
+
+	public void setPrimary(boolean primary) {
+		this.primary = primary;
+	}
+
+	public String getDataFormat() {
+		return dataFormat;
+	}
+
+	public void setDataFormat(String dataFormat) {
+		this.dataFormat = dataFormat;
+	}
+
+	public String getTechnicalName() {
+		return technicalName;
+	}
+
+	public void setTechnicalName(String technicalName) {
+		this.technicalName = technicalName;
+	}
+
+	@Override
+	public int compareTo(Field o) {
+		return this.position.compareTo(o.position);
+	}
+
+}

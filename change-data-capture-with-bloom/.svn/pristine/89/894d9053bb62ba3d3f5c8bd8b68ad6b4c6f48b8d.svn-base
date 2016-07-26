@@ -1,0 +1,41 @@
+/**
+ * 
+ */
+package com.zaloni.idc.utils;
+
+import java.io.IOException;
+
+import org.apache.log4j.spi.LoggerFactory;
+import org.slf4j.Logger;
+
+import com.zaloni.bedrock.util.RestAPIProperties;
+import com.zaloni.cdc.exceptions.IDCException;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class IDCUtils {
+
+	private static final Logger LOG = org.slf4j.LoggerFactory
+			.getLogger(IDCUtils.class);
+
+	public static RestAPIProperties getRestAPIProperties() throws IDCException {
+		final RestAPIProperties restApiProperties = new RestAPIProperties();
+		try {
+
+			restApiProperties.setBedrockPort(Constants.BEDROCK_PORT);
+			restApiProperties.setBedrockUrl(Constants.BEDROCK_HOST);
+			restApiProperties.setBedrockUser(Constants.BEDROCK_USER);
+			restApiProperties
+					.setBedrockUserPassword(Constants.BEDROCK_PASSWORD);
+		} catch (Exception e) {
+			LOG.debug("ERRO loading properties " + e.getMessage());
+			throw new IDCException(
+					"Error while getting bedrock properties information ", e);
+		}
+
+		return restApiProperties;
+	}
+
+}

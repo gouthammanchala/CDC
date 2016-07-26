@@ -1,0 +1,318 @@
+/**
+ * 
+ */
+package com.zaloni.idc.driver;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.filecache.DistributedCache;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
+import org.apache.hadoop.hive.metastore.api.AlreadyExistsException;
+import org.apache.hadoop.hive.metastore.api.InvalidObjectException;
+import org.apache.hadoop.hive.metastore.api.MetaException;
+import org.apache.hadoop.hive.metastore.api.Partition;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.MultipleInputs;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.util.bloom.BloomFilter;
+import org.apache.hadoop.util.bloom.Key;
+import org.apache.hadoop.util.hash.Hash;
+import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.zaloni.bedrock.mapreduce.AbstractMapReduce;
+import com.zaloni.cdc.exceptions.PartitionNotExistsException;
+import com.zaloni.idc.mapper.DeltaFileMapper;
+import com.zaloni.idc.mapper.HiveTableMapper;
+import com.zaloni.idc.model.bedrock.Entity;
+import com.zaloni.idc.model.bedrock.Field;
+import com.zaloni.idc.record.IDCRecord;
+import com.zaloni.idc.reducer.IDCReducer;
+import com.zaloni.idc.service.BedrockService;
+import com.zaloni.idc.utils.BloomFilterUtils;
+import com.zaloni.idc.utils.Constants;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class BedrockIDCJob extends AbstractMapReduce {
+
+	private static Logger LOG = LoggerFactory.getLogger(BedrockIDCJob.class);
+	private HiveMetaStoreClient hiveClient;
+	private Path outPath = null;
+	private Path activePartition = null;
+	private Path inActivePartition = null;
+	private String dbName = null;
+	private String tableName = null;
+	private String partitionToRead = null;
+	private String inActivePart = null;
+	private Path archivePath = null;
+	private String idcColumn = null;
+	private String idcFormat = null;
+	private String idcIndex = null;
+	private String delimiter = null;
+	private Entity entity = null;
+	private String primaryKeys = null;
+	private Path inputPath = null;
+	private List<Path> inputPaths;
+	private Path filterPath = null;
+
+	@Autowired
+	private BedrockService bedrockService = new BedrockService();
+
+	private void init() throws Exception {
+		inputPaths = new ArrayList<Path>();
+		idcColumn = workflowParameters.get("idcColumn");
+		partitionToRead = workflowParameters.get("partitionToRead");
+		inActivePart = workflowParameters.get("inActivePart");
+		entity = bedrockService.getEntity(workflowParameters.get("entityId"),
+				workflowParameters.get("entityVersion"));
+		long timeStamp = Calendar.getInstance().getTimeInMillis();
+		outPath = new Path(workflowParameters.get("outPath") + Path.SEPARATOR
+				+ entity.getName() + Path.SEPARATOR + timeStamp);
+		filterPath = new Path(workflowParameters.get("outPath")
+				+ Path.SEPARATOR + entity.getName() + Path.SEPARATOR + "filter"
+				+ timeStamp + ".filter");
+		archivePath = new Path(workflowParameters.get("archivePath")
+				+ Path.SEPARATOR + entity.getName());
+		dbName = entity.getSourceName();
+		tableName = entity.getName() + "_" + entity.getId() + "_"
+				+ entity.getVersion();
+		delimiter = workflowParameters.get("fieldDelim");
+
+		inputPath = new Path(workflowParameters.get("dfsInputPath"));
+		inputPaths.add(inputPath);
+		setIDCKeys();
+	}
+
+	private void setIDCKeys() {
+		StringBuilder keyIndices = new StringBuilder();
+		for (Field field : entity.getFields()) {
+			if (field.isPrimary()) {
+				keyIndices.append((field.getPosition() - 1) + ",");
+			}
+			if (idcColumn.equalsIgnoreCase(field.getTechnicalName())) {
+				idcIndex = field.getPosition() - 1 + "";
+				idcFormat = field.getDataFormat();
+			}
+		}
+		keyIndices.deleteCharAt(keyIndices.length() - 1);
+		primaryKeys = keyIndices.toString();
+	}
+
+	private void setUpHiveClient() throws MetaException {
+		HiveConf conf = new HiveConf();
+		String thriftUrl = Constants.METASTORE_URL;
+		if (null == thriftUrl) {
+			thriftUrl = "thrift:///";
+		}
+		conf.set("hive.metastore.uris", thriftUrl);
+		this.hiveClient = new HiveMetaStoreClient(conf);
+	}
+
+	private Path getHiveInputPath(Configuration conf) throws IOException,
+			MetaException, TException, PartitionNotExistsException {
+		setUpHiveClient();
+		List<String> parts = this.hiveClient.listPartitionNames(dbName,
+				tableName, (short) 100);
+		checkPartitionsExist(parts);
+		Partition partition = this.hiveClient.getPartition(dbName, tableName,
+				partitionToRead);
+		activePartition = new Path(partition.getSd().getLocation());
+		inputPaths.add(activePartition);
+		this.hiveClient.close();
+		return activePartition;
+	}
+
+	private void checkPartitionsExist(List<String> parts)
+			throws PartitionNotExistsException, InvalidObjectException,
+			AlreadyExistsException, MetaException, TException {
+		if (!parts.contains(partitionToRead)) {
+			throw new PartitionNotExistsException(
+					"Active partion does not exist for table " + this.tableName);
+		}
+		if (!parts.contains(inActivePart)) {
+			Partition partition = this.hiveClient.appendPartition(dbName,
+					tableName, inActivePart);
+			inActivePartition = new Path(partition.getSd().getLocation());
+		} else {
+			inActivePartition = new Path(this.hiveClient
+					.getPartition(dbName, tableName, inActivePart).getSd()
+					.getLocation());
+		}
+	}
+
+	private void moveOutFilesToTable(Configuration conf)
+			throws IllegalArgumentException, IOException {
+		LOG.debug("IDCjob.moveOutFilesToTable BEGIN ");
+		FileSystem fs = FileSystem.get(conf);
+		if (!fs.exists(archivePath)) {
+			fs.mkdirs(archivePath);
+		}
+		FileStatus[] activeFiles = fs.globStatus(new Path(outPath.toString()
+				+ Path.SEPARATOR + "hive*"));
+		FileStatus[] inActiveFiles = fs.globStatus(new Path(outPath.toString()
+				+ Path.SEPARATOR + "inactive*"));
+		FileStatus[] currentFiles = fs.listStatus(activePartition);
+		for (FileStatus inActiveFile : inActiveFiles) {
+			String fileName = inActiveFile.getPath().getName()
+					+ Calendar.getInstance().getTimeInMillis();
+			LOG.debug("rename in active file "
+					+ inActiveFile.getPath().toString()
+					+ " TO "
+					+ new Path(inActivePartition.toString() + Path.SEPARATOR
+							+ fileName).toString());
+			fs.rename(inActiveFile.getPath(),
+					new Path(inActivePartition.toString() + Path.SEPARATOR
+							+ fileName));
+		}
+		for (FileStatus currentFile : currentFiles) {
+			LOG.debug("rename current file "
+					+ currentFile.getPath().toString()
+					+ " TO "
+					+ new Path(archivePath.toString() + Path.SEPARATOR
+							+ Calendar.getInstance().getTimeInMillis()));
+			fs.rename(currentFile.getPath(),
+					new Path(archivePath.toString() + Path.SEPARATOR
+							+ Calendar.getInstance().getTimeInMillis()));
+		}
+		for (FileStatus activeFile : activeFiles) {
+			LOG.debug("rename current file "
+					+ activeFile.getPath().toString()
+					+ " TO "
+					+ new Path(activePartition.toString() + Path.SEPARATOR
+							+ "active"
+							+ Calendar.getInstance().getTimeInMillis()));
+			fs.rename(activeFile.getPath(), new Path(activePartition.toString()
+					+ Path.SEPARATOR + "active"
+					+ Calendar.getInstance().getTimeInMillis()));
+		}
+		LOG.debug("IDCjob.moveOutFilesToTable END ");
+	}
+
+	private int getNumOfReducers(FileSystem dfs) throws IOException {
+		long size = 0;
+		int numReducers = 1;
+		long bytesPerReducer = 10000000L;
+		for (Path path : inputPaths) {
+			size += dfs.getFileStatus(path).getLen();
+		}
+		return (int) Math.max(numReducers, size / bytesPerReducer);
+	}
+
+	private void trainIDCFilter(Configuration conf) throws IOException {
+		int numOfElements = Integer.parseInt(workflowParameters
+				.get("numOFRecs"));
+		int vectorsize = BloomFilterUtils.getOptimalBloomFilterSize(
+				numOfElements,
+				Float.parseFloat(workflowParameters.get("flasePosRate")));
+		int optimalK = BloomFilterUtils.getOptimalK((float) numOfElements,
+				(float) vectorsize);
+
+		BloomFilter filter = new BloomFilter(vectorsize, Math.max(1, optimalK),
+				Hash.MURMUR_HASH);
+		LOG.info("TRAINING IDC filter with vector size " + vectorsize
+				+ " nbHASH " + optimalK);
+		int numElements = 0;
+		FileSystem fs = FileSystem.get(conf);
+		String line = null;
+		for (FileStatus status : fs.listStatus(inputPath)) {
+			BufferedReader reader = new BufferedReader(new InputStreamReader(
+					fs.open(status.getPath())));
+			while ((line = reader.readLine()) != null) {
+				filter.add(new Key(getPrimaryKey(line)));
+				++numElements;
+			}
+			reader.close();
+		}
+		LOG.info("Trained BLOOM FILTER FOR " + numElements + " entries");
+
+		FSDataOutputStream out = fs.create(filterPath);
+		filter.write(out);
+		out.flush();
+		out.close();
+
+	}
+
+	private byte[] getPrimaryKey(String line) {
+		String[] tokens = primaryKeys.split(",");
+		String[] valuetokens = line.toString().split(delimiter);
+		StringBuilder keyBuilder = new StringBuilder();
+		for (String token : tokens) {
+			keyBuilder.append(valuetokens[Integer.parseInt(token)]);
+		}
+		return keyBuilder.toString().getBytes();
+	}
+
+	/**
+	 * @param args
+	 * @throws Exception
+	 */
+	public static void main(String[] args) throws Exception {
+		LOG.info("IDCJOB Begin " + Calendar.getInstance().getTimeInMillis());
+		int res = ToolRunner.run(new BedrockIDCJob(), args);
+		LOG.info("IDCJOB END " + Calendar.getInstance().getTimeInMillis());
+		System.exit(res);
+	}
+
+	@Override
+	public int run(String[] arg0) throws Exception {
+		init();
+		Configuration conf = getConf();
+		trainIDCFilter(conf);
+		boolean jobCompleted = false;
+		FileSystem dfs = FileSystem.get(conf);
+		conf.set("delimiter", delimiter);
+		conf.set("idcIndex", idcIndex);
+		conf.set("dateformat", idcFormat);
+		conf.set("primayKeyIndices", primaryKeys);
+		conf.set("filterPath", filterPath.toUri().toString());
+		Job job = Job.getInstance(conf, "BedrockIDCJob");
+		job.setJarByClass(BedrockIDCJob.class);
+
+		LOG.info("MESSAGE filter Path " + filterPath.toUri());
+		// job.addCacheFile(filterPath.toUri());
+		DistributedCache.addCacheFile(filterPath.toUri(), conf);
+		MultipleInputs.addInputPath(job, inputPath, TextInputFormat.class,
+				DeltaFileMapper.class);
+		MultipleInputs.addInputPath(job, getHiveInputPath(conf),
+				TextInputFormat.class, HiveTableMapper.class);
+		job.setMapOutputKeyClass(Text.class);
+		job.setMapOutputValueClass(IDCRecord.class);
+		job.setReducerClass(IDCReducer.class);
+		job.setOutputKeyClass(NullWritable.class);
+		job.setOutputValueClass(Text.class);
+		job.setNumReduceTasks(getNumOfReducers(dfs));
+		FileOutputFormat.setOutputPath(job, outPath);
+		MultipleOutputs.addNamedOutput(job, "hive", TextOutputFormat.class,
+				Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, "inactive", TextOutputFormat.class,
+				Text.class, Text.class);
+		jobCompleted = job.waitForCompletion(true);
+		if (jobCompleted) {
+			moveOutFilesToTable(conf);
+		}
+		return jobCompleted ? 0 : 1;
+	}
+
+}

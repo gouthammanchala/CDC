@@ -1,0 +1,23 @@
+/**
+ * 
+ */
+package com.zaloni.idc.record;
+
+import java.util.Comparator;
+import java.util.Date;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class IDCComparator implements Comparator<IDCRecord> {
+
+	@Override
+	public int compare(IDCRecord o1, IDCRecord o2) {
+		Date date1 = new Date();
+		Date date2 = new Date();
+		date1.setTime(o1.dateToCompare.get());
+		date2.setTime(o2.dateToCompare.get());
+		return date1.compareTo(date2);
+	}
+}

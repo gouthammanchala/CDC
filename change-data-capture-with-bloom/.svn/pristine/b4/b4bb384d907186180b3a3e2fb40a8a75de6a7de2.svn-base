@@ -1,0 +1,25 @@
+/**
+ * 
+ */
+package com.zaloni.idc.utils;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class Constants {
+
+	public static final String CONFIG_FILE = "config_file";
+
+	public static final String BEDROCK_PORT = "8080";
+
+	public static final String BEDROCK_HOST = "http://10.1.3.54";
+
+	public static final String BEDROCK_USER = "admin";
+
+	public static final String BEDROCK_PASSWORD = "admin";
+
+	// public static final String METASTORE_URL = "thrift://10.11.12.245:9083";
+
+	public static final String METASTORE_URL = "thrift://zphdc1n1:9083";
+}

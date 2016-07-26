@@ -1,0 +1,142 @@
+/**
+ * 
+ */
+package com.zaloni.idc.restgetway;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
+import java.net.URL;
+
+import org.apache.log4j.Logger;
+import org.springframework.stereotype.Repository;
+
+/**
+ * @author Revanth
+ * 
+ */
+@Repository
+public class RESTGateway {
+
+	private static final Logger _LOGGER = Logger.getLogger(RESTGateway.class);
+
+	/**
+	 * This method will be called to access REST service with POST Method
+	 * 
+	 * @param url
+	 *            - The REST Service URL with GET Method
+	 * @param json
+	 *            - The JSON value to be passed on to the REST Service
+	 */
+	public String postMethod(String urlKey, String json) throws Exception {
+		_LOGGER.info("Begin POST Client () ");
+		String output = "";
+		try {
+
+			_LOGGER.info(" URL Received is :: " + urlKey + " JSON " + json);
+			URL url = new URL(urlKey);
+			HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+			conn.setDoOutput(true);
+			conn.setRequestMethod("POST");
+			conn.setConnectTimeout(60000);
+			conn.setReadTimeout(60000);
+			conn.setRequestProperty("Content-Type", "application/json");
+			_LOGGER.info("JSON to POST :: " + json);
+			OutputStream os = conn.getOutputStream();
+			os.write(json.getBytes());
+			os.flush();
+
+			BufferedReader br = new BufferedReader(new InputStreamReader(
+					(conn.getInputStream())));
+
+			_LOGGER.info("Output from server..");
+			String tempOuput = null;
+			while ((tempOuput = br.readLine()) != null) {
+				output = output.concat(tempOuput);
+				_LOGGER.info(output);
+			}
+			conn.disconnect();
+		} catch (Exception e) {
+			_LOGGER.error("Exception Catch in Rest Cilent :: " + e.getMessage());
+			throw e;
+		}
+
+		_LOGGER.info("End POST Client () ");
+		return output;
+	}
+
+	/**
+	 * This method will be called to access REST service with GET Method
+	 * 
+	 * @param url
+	 *            - The REST Service URL with GET Method
+	 */
+	public String getMethod(String urlKey) throws Exception {
+		_LOGGER.info("Begin  GET Client () ");
+		String output = "";
+		try {
+
+			_LOGGER.info(" URL Received is :: " + urlKey);
+			URL url = new URL(urlKey);
+			HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+			conn.setDoOutput(true);
+			conn.setRequestMethod("GET");
+			BufferedReader br = new BufferedReader(new InputStreamReader(
+					(conn.getInputStream())));
+
+			_LOGGER.info("Output from server..");
+			String tempOuput = null;
+			while ((tempOuput = br.readLine()) != null) {
+				output = output.concat(tempOuput);
+				_LOGGER.info(output);
+			}
+			conn.disconnect();
+		} catch (Exception e) {
+			_LOGGER.error("Exception Catch in Rest Cilent :: " + e.getMessage());
+			throw e;
+		}
+		return output;
+	}
+
+	public String getAuthCookie() throws Exception {
+		String output = "";
+		String json = "{\"username\":\"admin\", \"password\":\"admin\"}";
+		URL url = new URL(
+				"http://10.11.12.250:8080/bedrock-app/services/rest/admin/getUserRole");
+		HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+		conn.setDoOutput(true);
+		conn.setRequestMethod("POST");
+		conn.setConnectTimeout(60000);
+		conn.setReadTimeout(60000);
+		conn.setRequestProperty("Content-Type", "application/json");
+		_LOGGER.info("JSON to POST :: " + json);
+		System.out.println("JSON to POST :: " + json);
+		OutputStream os = conn.getOutputStream();
+		os.write(json.getBytes());
+		os.flush();
+
+		BufferedReader br = new BufferedReader(new InputStreamReader(
+				(conn.getInputStream())));
+
+		_LOGGER.info("Output from server..");
+		String tempOuput = null;
+		while ((tempOuput = br.readLine()) != null) {
+			output = output.concat(tempOuput);
+			_LOGGER.info(output);
+			System.out.println(output);
+		}
+		conn.disconnect();
+
+		_LOGGER.info("End POST Client () ");
+		return output;
+	}
+
+	public static void main(String[] args) throws Exception {
+		RESTGateway restGateway = new RESTGateway();
+
+		restGateway.getAuthCookie();
+	}
+
+}

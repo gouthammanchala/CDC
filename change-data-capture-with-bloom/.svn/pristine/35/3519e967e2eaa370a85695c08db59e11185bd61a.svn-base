@@ -1,0 +1,245 @@
+/**
+ * 
+ */
+package com.zaloni.idc.driver;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.URI;
+import java.util.Calendar;
+import java.util.List;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.filecache.DistributedCache;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.metastore.HiveMetaStoreClient;
+import org.apache.hadoop.hive.metastore.api.AlreadyExistsException;
+import org.apache.hadoop.hive.metastore.api.InvalidObjectException;
+import org.apache.hadoop.hive.metastore.api.MetaException;
+import org.apache.hadoop.hive.metastore.api.Partition;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.MultipleInputs;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.util.bloom.BloomFilter;
+import org.apache.hadoop.util.bloom.Key;
+import org.apache.hadoop.util.hash.Hash;
+import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.zaloni.cdc.exceptions.PartitionNotExistsException;
+import com.zaloni.idc.mapper.DeltaFileMapper;
+import com.zaloni.idc.mapper.HiveTableMapper;
+import com.zaloni.idc.record.IDCRecord;
+import com.zaloni.idc.reducer.IDCReducer;
+import com.zaloni.idc.utils.BloomFilterUtils;
+import com.zaloni.idc.utils.Constants;
+
+/**
+ * @author Revanth
+ * 
+ */
+public class IDCJob extends Configured implements Tool {
+
+	private static Logger LOG = LoggerFactory.getLogger(IDCJob.class);
+
+	private HiveMetaStoreClient hiveClient;
+
+	private Path outPath = new Path("/user/bedrock/idc_out");
+
+	private Path filterPath = new Path("/user/bedrock/bloom/filter.txt");
+
+	private Path inputPath = new Path("/user/bedrock/gpm/Identifier.dat");
+
+	private Path activePartition = null;
+
+	private Path inActivePartition = null;
+
+	String dbName = "gpm";
+	String tableName = "IDENTIFIER_6_2";
+	String partitionToRead = "record_status=ACTIVE";
+	String inActivePart = "record_status=INACTIVE";
+
+	private Path archivePath = new Path("/user/bedrock/archive/old");
+
+	private void setUpHiveClient() throws MetaException {
+		HiveConf conf = new HiveConf();
+		String thriftUrl = "thrift://zphdc1n1:9083";
+		/*
+		 * if (null == thriftUrl) { thriftUrl = "thrift:///"; }
+		 */
+		conf.set("hive.metastore.uris", thriftUrl);
+		this.hiveClient = new HiveMetaStoreClient(conf);
+	}
+
+	private Path getHiveInputPath(Configuration conf) throws IOException,
+			MetaException, TException, PartitionNotExistsException {
+		setUpHiveClient();
+		List<String> parts = this.hiveClient.listPartitionNames(dbName,
+				tableName, (short) 100);
+		checkPartitionsExist(parts);
+		Partition partition = this.hiveClient.getPartition(dbName, tableName,
+				partitionToRead);
+		activePartition = new Path(partition.getSd().getLocation());
+		this.hiveClient.close();
+		return activePartition;
+	}
+
+	private void checkPartitionsExist(List<String> parts)
+			throws PartitionNotExistsException, InvalidObjectException,
+			AlreadyExistsException, MetaException, TException {
+		if (!parts.contains(partitionToRead)) {
+			throw new PartitionNotExistsException(
+					"Active partion does not exist for table " + this.tableName);
+		}
+		if (!parts.contains(inActivePart)) {
+			Partition partition = this.hiveClient.appendPartition(dbName,
+					tableName, inActivePart);
+			inActivePartition = new Path(partition.getSd().getLocation());
+		} else {
+			inActivePartition = new Path(this.hiveClient
+					.getPartition(dbName, tableName, inActivePart).getSd()
+					.getLocation());
+		}
+	}
+
+	public int run(String[] args) throws Exception {
+		Configuration conf = getConf();
+
+		trainIDCFilter(conf, Integer.parseInt(args[0]),
+				Float.parseFloat(args[1]));
+		DistributedCache.addCacheFile(filterPath.toUri(), conf);
+		boolean jobCompleted = false;
+		conf.set("delimiter", ",");
+		conf.set("idcIndex", "8");
+		conf.set("dateformat", "MM-dd-yyyy");
+		conf.set("primayKeyIndices", "0");
+		Job job = Job.getInstance(conf, "IDCJobWithBloom");
+		job.setJarByClass(IDCJob.class);
+
+		MultipleInputs.addInputPath(job, inputPath, TextInputFormat.class,
+				DeltaFileMapper.class);
+		MultipleInputs.addInputPath(job, getHiveInputPath(conf),
+				TextInputFormat.class, HiveTableMapper.class);
+		job.setMapOutputKeyClass(Text.class);
+		job.setMapOutputValueClass(IDCRecord.class);
+		job.setReducerClass(IDCReducer.class);
+		job.setNumReduceTasks(1);
+		job.setOutputKeyClass(NullWritable.class);
+		job.setOutputValueClass(Text.class);
+		FileOutputFormat.setOutputPath(job, outPath);
+		MultipleOutputs.addNamedOutput(job, "active", TextOutputFormat.class,
+				Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, "inactive", TextOutputFormat.class,
+				Text.class, Text.class);
+		// job.addCacheFile(new URI(filterPath.toString() + "#filter"));
+		jobCompleted = job.waitForCompletion(true);
+		if (jobCompleted) {
+			moveOutFilesToTable(conf);
+		}
+		return jobCompleted ? 0 : 1;
+	}
+
+	private void trainIDCFilter(Configuration conf, int noOfElements, float fpr)
+			throws IOException {
+		int vectorsize = BloomFilterUtils.getOptimalBloomFilterSize(
+				noOfElements, fpr);
+		int optimalK = BloomFilterUtils.getOptimalK((float) noOfElements,
+				(float) vectorsize);
+
+		BloomFilter filter = new BloomFilter(vectorsize, Math.max(1, optimalK),
+				Hash.MURMUR_HASH);
+		System.out.println("TRAINING IDC filter with vector size " + vectorsize
+				+ " nbHASH " + optimalK);
+		LOG.info("TRAINING IDC filter with vector size " + vectorsize
+				+ " nbHASH " + optimalK);
+		int numElements = 0;
+		FileSystem fs = FileSystem.get(conf);
+		String line = null;
+		for (FileStatus status : fs.listStatus(inputPath)) {
+			BufferedReader reader = new BufferedReader(new InputStreamReader(
+					fs.open(status.getPath())));
+			while ((line = reader.readLine()) != null) {
+				byte[] key = getPrimaryKey(line);
+				filter.add(new Key(key));
+				++numElements;
+
+			}
+			reader.close();
+		}
+		LOG.info("Trained BLOOM FILTER FOR " + numElements + " entries"
+				+ "vectorsize" + vectorsize + " K-factor " + optimalK);
+
+		FSDataOutputStream out = fs.create(filterPath);
+		filter.write(out);
+		out.flush();
+		out.close();
+
+	}
+
+	private byte[] getPrimaryKey(String line) {
+		String[] valuetokens = line.toString().split(",");
+		StringBuilder keyBuilder = new StringBuilder();
+		keyBuilder.append(valuetokens[0]);
+		return keyBuilder.toString().getBytes();
+	}
+
+	private void moveOutFilesToTable(Configuration conf)
+			throws IllegalArgumentException, IOException {
+		LOG.info("IDCjob.moveOutFilesToTable BEGIN ");
+		FileSystem fs = FileSystem.get(conf);
+		if (!fs.exists(archivePath)) {
+			fs.mkdirs(archivePath);
+		}
+		FileStatus[] activeFiles = fs.globStatus(new Path(outPath.toString()
+				+ Path.SEPARATOR + Constants.ACTIVE_FILE_NAME + "*"));
+		FileStatus[] inActiveFiles = fs.globStatus(new Path(outPath.toString()
+				+ Path.SEPARATOR + Constants.INACTIVE_FILE_NAME + "*"));
+		FileStatus[] currentFiles = fs.listStatus(activePartition);
+		for (FileStatus inActiveFile : inActiveFiles) {
+			/*
+			 * System.out.println("moving inactive files ++++ " +
+			 * inActiveFile.getPath());
+			 */
+			String fileName = inActiveFile.getPath().getName()
+					+ Calendar.getInstance().getTimeInMillis();
+			fs.rename(inActiveFile.getPath(),
+					new Path(inActivePartition.toString() + Path.SEPARATOR
+							+ fileName));
+		}
+		for (FileStatus currentFile : currentFiles) {
+			fs.rename(currentFile.getPath(),
+					new Path(archivePath.toString() + Path.SEPARATOR
+							+ Calendar.getInstance().getTimeInMillis()));
+		}
+		for (FileStatus activeFile : activeFiles) {
+			fs.rename(activeFile.getPath(), new Path(activePartition.toString()
+					+ Path.SEPARATOR + "active"
+					+ Calendar.getInstance().getTimeInMillis()));
+		}
+		LOG.info("IDCjob.moveOutFilesToTable END ");
+	}
+
+	public static void main(String[] args) {
+		try {
+			int res = ToolRunner.run(new Configuration(), new IDCJob(), args);
+			System.exit(res);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+
+}

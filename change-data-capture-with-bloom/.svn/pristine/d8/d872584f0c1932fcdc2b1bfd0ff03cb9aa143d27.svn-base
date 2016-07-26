@@ -1,0 +1,26 @@
+/**
+ * 
+ */
+package com.zaloni.cdc.exceptions;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class PartitionNotExistsException extends Exception {
+
+	public PartitionNotExistsException(Exception e) {
+		super(e);
+		return;
+	}
+
+	public PartitionNotExistsException(String msg) {
+		super(msg);
+		return;
+	}
+
+	public PartitionNotExistsException(String msg, Exception e) {
+		super(msg, e);
+		return;
+	}
+}

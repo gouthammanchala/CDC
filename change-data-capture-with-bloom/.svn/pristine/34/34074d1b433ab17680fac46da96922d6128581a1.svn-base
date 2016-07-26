@@ -1,0 +1,141 @@
+/**
+ * 
+ */
+package com.zaloni.idc.driver;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.Calendar;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.filecache.DistributedCache;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.hadoop.util.Tool;
+import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.util.bloom.BloomFilter;
+import org.apache.hadoop.util.bloom.Key;
+import org.apache.hadoop.util.hash.Hash;
+import org.apache.log4j.Logger;
+
+import com.zaloni.idc.mapper.BloomTestMapper;
+import com.zaloni.idc.reducer.FilterReducer;
+import com.zaloni.idc.utils.BloomFilterUtils;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class FilterConstruct extends Configured implements Tool {
+
+	private static final Logger LOG = Logger.getLogger(FilterConstruct.class);
+
+	private Path filterPath = new Path("/user/bedrock/filter.txt");
+
+	@Override
+	public int run(String[] args) throws Exception {
+
+		int noOfElements = Integer.parseInt(args[0]);
+		float fpr = Float.parseFloat(args[1]);
+		Configuration conf = getConf();
+		DistributedCache.addCacheFile(filterPath.toUri(), conf);
+		Job job = Job.getInstance(conf, "filterTest");
+		job.setJarByClass(FilterConstruct.class);
+		job.setMapperClass(BloomTestMapper.class);
+		job.setInputFormatClass(TextInputFormat.class);
+		job.setMapOutputKeyClass(Text.class);
+		job.setMapOutputValueClass(Text.class);
+		job.setReducerClass(FilterReducer.class);
+		job.setNumReduceTasks(1);
+		job.setOutputKeyClass(NullWritable.class);
+		job.setOutputValueClass(Text.class);
+		FileInputFormat.setInputPaths(job, new Path(
+				"/user/bedrock/retail_data/status=active/delta1.txt"));
+		FileOutputFormat.setOutputPath(job, new Path(
+				"/user/bedrock/bloom_test/"
+						+ Calendar.getInstance().getTimeInMillis()));
+		trainIDCFilter(conf, noOfElements, fpr);
+		conf.set("filterPath", filterPath.toUri().toString());
+		MultipleOutputs.addNamedOutput(job, "filtered", TextOutputFormat.class,
+				Text.class, Text.class);
+
+		boolean jobCompleted = job.waitForCompletion(true);
+		return jobCompleted ? 0 : 1;
+	}
+
+	private void trainIDCFilter(Configuration conf, int noOfElements, float fpr)
+			throws IOException {
+		int vectorsize = BloomFilterUtils.getOptimalBloomFilterSize(
+				noOfElements, fpr);
+		int optimalK = BloomFilterUtils.getOptimalK((float) noOfElements,
+				(float) vectorsize);
+
+		BloomFilter filter = new BloomFilter(vectorsize, Math.max(1, optimalK),
+				Hash.MURMUR_HASH);
+		System.out.println("TRAINING IDC filter with vector size " + vectorsize
+				+ " nbHASH " + optimalK);
+		LOG.info("TRAINING IDC filter with vector size " + vectorsize
+				+ " nbHASH " + optimalK);
+		int numElements = 0;
+		FileSystem fs = FileSystem.get(conf);
+		String line = null;
+		for (FileStatus status : fs.listStatus(new Path(
+				"/user/bedrock/delta.txt"))) {
+			BufferedReader reader = new BufferedReader(new InputStreamReader(
+					fs.open(status.getPath())));
+			while ((line = reader.readLine()) != null) {
+				byte[] key = getPrimaryKey(line);
+				LOG.info("ADDING " + new String(key)
+						+ " 0000000000000000000000000000");
+				filter.add(new Key(key));
+				if (filter.membershipTest(new Key(key))) {
+					LOG.info(new String(key)
+							+ " is IN THE FILTER +++++++++++++++++++++++++ ");
+				}
+				++numElements;
+			}
+			reader.close();
+		}
+		LOG.info("Trained BLOOM FILTER FOR " + numElements + " entries");
+
+		FSDataOutputStream out = fs.create(filterPath);
+		filter.write(out);
+		out.flush();
+		out.close();
+
+	}
+
+	private byte[] getPrimaryKey(String line) {
+		String[] valuetokens = line.toString().split(",");
+		StringBuilder keyBuilder = new StringBuilder();
+		keyBuilder.append(valuetokens[0]);
+		return keyBuilder.toString().getBytes();
+	}
+
+	/**
+	 * @param args
+	 */
+	public static void main(String[] args) {
+		try {
+			int res = ToolRunner.run(new Configuration(),
+					new FilterConstruct(), args);
+			System.exit(res);
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+	}
+
+}

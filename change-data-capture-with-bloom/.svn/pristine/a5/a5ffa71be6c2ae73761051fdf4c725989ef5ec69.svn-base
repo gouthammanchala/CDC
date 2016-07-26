@@ -1,0 +1,198 @@
+package com.zaloni.idc.reducer;
+
+import java.io.IOException;
+import java.text.DateFormat;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.io.BooleanWritable;
+import org.apache.hadoop.io.NullWritable;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.zaloni.idc.record.IDCRecord;
+
+public class IDCReducer extends Reducer<Text, IDCRecord, NullWritable, Text> {
+
+	private static Logger LOG = LoggerFactory.getLogger(IDCReducer.class);
+	private MultipleOutputs<NullWritable, Text> out;
+
+	private Map<Text, List<String>> deltaRecs;
+
+	private Map<Text, String> hiveRecs;
+
+	private List<String> activeRecsToWrite;
+
+	private List<String> inActiveRecToWrite;
+
+	private IDCRecComparator idcRecComparator;
+
+	@Override
+	protected void setup(Context context) throws IOException,
+			InterruptedException {
+		super.setup(context);
+		Configuration conf = context.getConfiguration();
+		out = new MultipleOutputs<NullWritable, Text>(context);
+		idcRecComparator = new IDCRecComparator();
+		idcRecComparator.setDelimiter(conf.get("delimiter"));
+		idcRecComparator.setIndexToCompare(conf.getInt("idcIndex", 0));
+		idcRecComparator.setDATE_FORMAT(new SimpleDateFormat(conf
+				.get("dateformat")));
+	}
+
+	@Override
+	protected void reduce(Text key, Iterable<IDCRecord> values, Context context)
+			throws IOException, InterruptedException {
+		initialize();
+		prepareRecords(key, values);
+		mergeDeltaRecs();
+		writeToOut();
+
+	}
+
+	private void initialize() {
+		LOG.info("INITIALIZING deltaRecs, hiveRecs, activeRecsToWrite, inActiveRecToWrite");
+		deltaRecs = new HashMap<Text, List<String>>();
+		hiveRecs = new HashMap<Text, String>();
+		activeRecsToWrite = new ArrayList<String>();
+		inActiveRecToWrite = new ArrayList<String>();
+	}
+
+	private void mergeDeltaRecs() {
+		LOG.info(" COMPARING  delta records to Hive Records");
+		for (Text deltaKey : deltaRecs.keySet()) {
+			Collections.sort(deltaRecs.get(deltaKey), idcRecComparator);
+			List<String> updateRecs = deltaRecs.get(deltaKey);
+			int size = updateRecs.size();
+
+			/*LOG.info(" SIZE OF DELTA RECS FOR KEY " + deltaKey + " IS " + size);
+
+			for (String updateRecord : updateRecs) {
+
+				LOG.info("UPDATE KEY  +++++++++ " + deltaKey
+						+ " UPDATE RECORD ============= " + updateRecord);
+			}*/
+
+			if (hiveRecs.containsKey(deltaKey)) {
+				if (compareDeltaToHive(hiveRecs.get(deltaKey),
+						updateRecs.get(0))) {
+					activeRecsToWrite.add(updateRecs.get(0));
+					inActiveRecToWrite.add(hiveRecs.remove(deltaKey));
+				}
+			} else if (!hiveRecs.containsKey(deltaKey)) {
+				activeRecsToWrite.add(deltaRecs.get(deltaKey).get(0));
+			}
+			if (size > 1) {
+				inActiveRecToWrite.addAll(updateRecs.subList(1,
+						updateRecs.size()));
+			}
+		}
+		activeRecsToWrite.addAll(hiveRecs.values());
+	}
+
+	private boolean compareDeltaToHive(String hiveRec, String deltaRec) {
+		boolean isNew = false;
+		isNew = idcRecComparator.compare(deltaRec, hiveRec) < 0 ? true : false;
+		return isNew;
+	}
+
+	private void writeToOut() {
+		LOG.info("Writing files to OUT ");
+		try {
+			for (String activeValue : activeRecsToWrite) {
+				out.write("hive", NullWritable.get(), activeValue);
+			}
+			for (String inActiveRec : inActiveRecToWrite) {
+				out.write("inactive", NullWritable.get(), inActiveRec);
+			}
+		} catch (IOException e) {
+			LOG.error(e.getMessage());
+		} catch (InterruptedException e) {
+			LOG.error(e.getMessage());
+		}
+		LOG.info("EXITING writeToOut");
+
+	}
+
+	public void prepareRecords(Text key, Iterable<IDCRecord> values) {
+		for (IDCRecord record : values) {
+			if (record.getIsDeltaRecord().equals(new BooleanWritable(true))) {
+				if (!CollectionUtils.isNotEmpty(deltaRecs.get(key))) {
+					deltaRecs.put(key, new ArrayList<String>());
+				}
+				deltaRecs.get(key).add(record.getValue().toString());
+			} else {
+				hiveRecs.put(key, record.getValue().toString());
+			}
+		}
+	}
+
+	@Override
+	protected void cleanup(Context context) throws IOException,
+			InterruptedException {
+		out.close();
+		super.cleanup(context);
+	}
+
+	public class IDCRecComparator implements Comparator<String> {
+
+		private int indexToCompare;
+		private String delimiter;
+		private DateFormat DATE_FORMAT = new SimpleDateFormat("MM/dd/yyyy");
+
+		public int getIndexToCompare() {
+			return indexToCompare;
+		}
+
+		public String getDelimiter() {
+			return delimiter;
+		}
+
+		public void setDelimiter(String delimiter) {
+			this.delimiter = delimiter;
+		}
+
+		public void setIndexToCompare(int indexToCompare) {
+			this.indexToCompare = indexToCompare;
+		}
+
+		public DateFormat getDATE_FORMAT() {
+			return DATE_FORMAT;
+		}
+
+		public void setDATE_FORMAT(DateFormat dATE_FORMAT) {
+			DATE_FORMAT = dATE_FORMAT;
+		}
+
+		@Override
+		public int compare(String o1, String o2) {
+			Date hiveDate = new Date();
+			Date idcRecDate = new Date();
+			String[] tokens1 = o1.split(delimiter);
+			String[] tokens2 = o2.split(delimiter);
+			try {
+				hiveDate.setTime(DATE_FORMAT
+						.parse(tokens1[this.indexToCompare]).getTime());
+				idcRecDate.setTime(DATE_FORMAT.parse(
+						tokens2[this.indexToCompare]).getTime());
+			} catch (ParseException e) {
+				e.printStackTrace();
+			}
+			return hiveDate.compareTo(idcRecDate) * (-1);
+		}
+
+	}
+
+}

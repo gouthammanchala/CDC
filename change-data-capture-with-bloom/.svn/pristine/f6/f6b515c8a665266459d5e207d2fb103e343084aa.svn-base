@@ -1,0 +1,108 @@
+/**
+ * 
+ */
+package com.zaloni.idc.service;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import com.zaloni.bedrock.services.metadata.BedrockMetadataServiceImpl;
+import com.zaloni.bedrock.util.RestException;
+import com.zaloni.bedrock.vo.MetadataJSONResponse;
+import com.zaloni.bedrock.vo.metadata.EntityTypeFieldsVO;
+import com.zaloni.bedrock.vo.metadata.EntityTypeVO;
+import com.zaloni.cdc.exceptions.IDCException;
+import com.zaloni.idc.model.bedrock.Entity;
+import com.zaloni.idc.model.bedrock.Field;
+import com.zaloni.idc.utils.IDCUtils;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+@Service
+public class BedrockService {
+
+	private static Logger LOG = LoggerFactory.getLogger(BedrockService.class);
+
+	private BedrockMetadataServiceImpl bedrockMetadataService;
+
+	public BedrockService() {
+		try {
+			init();
+		} catch (IDCException e) {
+			LOG.debug("ERROR CREATING BEDROCK SERVICE" + e.getMessage());
+		}
+	}
+
+	private void init() throws IDCException {
+		this.bedrockMetadataService = new BedrockMetadataServiceImpl(
+				IDCUtils.getRestAPIProperties());
+	}
+
+	public Entity getEntity(String entityId, String entityVersion)
+			throws Exception {
+		return mapEntity(bedrockMetadataService.fetchEntityDetails(
+				Integer.parseInt(entityId), Integer.parseInt(entityVersion)));
+
+	}
+
+	private Entity mapEntity(MetadataJSONResponse metadataJSONResponse)
+			throws JSONException, RestException {
+
+		LOG.debug("JSON RESPONE FROM service + _+_+_+_+_+_+_+_ "
+				+ metadataJSONResponse);
+		// EntityTypeVO jsonResponse = metadataJSONResponse.getEntityType();
+
+		// JSONObject result = new
+		// JSONObject(jsonResponse.getString("payload"));
+		return mapResult(metadataJSONResponse.getEntityType());
+	}
+
+	private Entity mapResult(EntityTypeVO result) throws JSONException {
+		Entity entity = new Entity();
+		entity.setId(result.getEntityTypeId() + "");
+		entity.setName(result.getTechnicalName());
+		entity.setSourceName(result.getSourceSchema());
+		entity.setVersion(result.getVersion() + "");
+		List<Field> fields = mapFields(result.getFields());
+		Collections.sort(fields);
+		entity.setFields(fields);
+		entity.setDelimiter(result.getDelimiter());
+		return entity;
+	}
+
+	private List<Field> mapFields(List<EntityTypeFieldsVO> jsonArray)
+			throws JSONException {
+		List<Field> fields = new ArrayList<Field>();
+		for (EntityTypeFieldsVO entityField : jsonArray) {
+			fields.add(mapJsonField(entityField));
+		}
+		return fields;
+	}
+
+	private Field mapJsonField(EntityTypeFieldsVO jsonObject)
+			throws JSONException {
+		Field field = new Field();
+		field.setPosition(jsonObject.getPosition());
+		field.setPrimary(jsonObject.isPrimary());
+		field.setDataFormat(jsonObject.getDataFormat());
+		field.setTechnicalName(jsonObject.getFieldTechnicalName());
+		return field;
+	}
+
+	/*
+	 * public static void main(String[] args) { BedrockService service = new
+	 * BedrockService(); try { service.getEntity("", "142", "1"); } catch
+	 * (Exception e) { // TODO Auto-generated catch block e.printStackTrace(); }
+	 * }
+	 */
+
+}

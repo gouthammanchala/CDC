@@ -1,0 +1,27 @@
+/**
+ * 
+ */
+package com.zaloni.cdc.exceptions;
+
+/**
+ * @author revanthpamballa
+ * 
+ */
+public class IDCException extends Exception {
+
+	public IDCException(Exception e) {
+		super(e);
+		return;
+	}
+
+	public IDCException(String msg) {
+		super(msg);
+		return;
+	}
+
+	public IDCException(String msg, Exception e) {
+		super(msg, e);
+		return;
+	}
+
+}
